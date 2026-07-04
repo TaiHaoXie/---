@@ -143,6 +143,20 @@
     return "评分选项不存在：" + field + " = " + score + "；页面可选：" + options;
   }
 
+  function pickDirectScoreInputIndex(controlCount, hasReason) {
+    if (controlCount <= 0) return null;
+    if (hasReason && controlCount < 2) return null;
+    return 0;
+  }
+
+  function getDirectInputControls(row) {
+    return [...row.querySelectorAll("textarea, input")]
+      .filter(isVisible)
+      .filter(el => el.closest(".ant-select") == null)
+      .filter(el => el.getAttribute("aria-hidden") !== "true")
+      .filter(el => el.name !== "hiddenTextarea");
+  }
+
   function compactLogText(value, maxLength = 120) {
     const text = String(value || "").replace(/\s+/g, " ").trim();
     if (text.length <= maxLength) return text;
@@ -368,24 +382,40 @@
       throw new Error("找不到评分/理由行：" + field);
     }
 
+    const directControls = getDirectInputControls(row);
+    let scoreControl = null;
+
     if (answer.score) {
       const selector = row.querySelector(".ant-select-selector, [role='combobox']");
-      if (!selector) throw new Error("找不到评分下拉框：" + field);
+      let handledBySelect = false;
+      let selectOptions = [];
 
-      selector.click();
-      await sleep(200);
-      const options = [...document.querySelectorAll(".ant-select-item-option, [role='option']")]
-        .filter(isVisible);
-      const option = findScoreOption(options, answer.score);
-      if (!option) throw new Error(formatScoreOptionError(field, answer.score, options));
-      option.click();
+      if (selector) {
+        selector.click();
+        await sleep(200);
+        selectOptions = [...document.querySelectorAll(".ant-select-item-option, [role='option']")]
+          .filter(isVisible);
+        const option = findScoreOption(selectOptions, answer.score);
+        if (option) {
+          option.click();
+          handledBySelect = true;
+        }
+      }
+
+      if (!handledBySelect) {
+        const scoreInputIndex = pickDirectScoreInputIndex(directControls.length, Boolean(answer.reason));
+        if (scoreInputIndex == null) {
+          if (selectOptions.length) throw new Error(formatScoreOptionError(field, answer.score, selectOptions));
+          throw new Error("找不到评分输入框：" + field + "；可见输入框数量：" + directControls.length);
+        }
+        scoreControl = directControls[scoreInputIndex];
+        setNativeValue(scoreControl, normalizeScoreText(answer.score));
+      }
     }
 
     if (answer.reason) {
-      const controls = [...row.querySelectorAll("textarea, input")]
-        .filter(isVisible)
-        .filter(el => el.closest(".ant-select") == null);
-      const target = controls[controls.length - 1];
+      const reasonControls = directControls.filter(control => control !== scoreControl);
+      const target = reasonControls[reasonControls.length - 1];
       if (!target) throw new Error("找不到理由输入框：" + field);
       setNativeValue(target, answer.reason);
     }

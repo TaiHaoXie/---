@@ -80,6 +80,12 @@
     return "评分选项不存在：" + field + " = " + score + "；页面可选：" + options;
   }
 
+  function pickDirectScoreInputIndex(controlCount, hasReason) {
+    if (controlCount <= 0) return null;
+    if (hasReason && controlCount < 2) return null;
+    return 0;
+  }
+
   const api = {
     normalizeText,
     makeAnchors,
@@ -87,6 +93,7 @@
     normalizeScoreText,
     findScoreOptionText,
     formatScoreOptionError,
+    pickDirectScoreInputIndex,
   };
 
   if (typeof module !== "undefined" && module.exports) {

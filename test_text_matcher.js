@@ -45,4 +45,8 @@ assert.ok(
     .includes("页面可选：0 / 1 / 2 / 3 / 4")
 );
 
+assert.strictEqual(matcher.pickDirectScoreInputIndex(2, true), 0);
+assert.strictEqual(matcher.pickDirectScoreInputIndex(1, false), 0);
+assert.strictEqual(matcher.pickDirectScoreInputIndex(1, true), null);
+
 console.log("text matcher tests OK");
