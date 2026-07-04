@@ -19,6 +19,12 @@ DEFAULT_SPREADSHEET_TOKEN = "QjQfsbWPGhS5Mdt8lrLck3WDnEh"
 DEFAULT_SHEET_ID = "0aGjtg"
 DEFAULT_READ_RANGE = "A1:L5000"
 REQUIRED_FIELDS = ["prompt", "A", "B", "C", "D"]
+ANSWER_COLUMNS = {
+    "A": ("B", "C", "D"),
+    "B": ("E", "F", "G"),
+    "C": ("H", "I", "J"),
+    "D": ("K", None, None),
+}
 
 
 def strip_char_count(value: Any) -> str:
@@ -53,6 +59,101 @@ def csv_for_row(row: List[str]) -> str:
 
 def validate_payload(data: Dict[str, Any]) -> List[str]:
     return [field for field in REQUIRED_FIELDS if not strip_char_count(data.get(field, ""))]
+
+
+def normalize_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def tag_code(tag_text: str) -> str:
+    text = tag_text.strip()
+    match = re.match(r"^([A-Z]-[A-Z]+-\d+(?:-P\d+)?)", text)
+    if match:
+        return match.group(1)
+    return text.split("：", 1)[0].split(":", 1)[0].strip("【】 ")
+
+
+def is_note_tag(tag_text: str) -> bool:
+    return bool(re.search(r"-P\d+\b", tag_code(tag_text)))
+
+
+def strip_inline_tags(value: str) -> str:
+    return re.sub(r"【[^】]+】", "", str(value or "")).strip()
+
+
+def target_before_tag(prefix: str) -> str:
+    text = strip_inline_tags(prefix)
+    text = re.sub(r"[\s，,：:；;、]+$", "", text).strip()
+    if not text:
+        return ""
+
+    boundaries = [text.rfind(mark) for mark in ["。", "！", "？", "\n"]]
+    start = max(boundaries)
+    if start >= 0 and start + 1 < len(text):
+        candidate = text[start + 1 :].strip()
+        if len(candidate) >= 8:
+            return re.sub(r"[。！？.!?]+$", "", candidate).strip()
+    return re.sub(r"[。！？.!?]+$", "", text[-160:].strip()).strip()
+
+
+def parse_inline_annotations(text: str, field: str) -> List[Dict[str, str]]:
+    annotations: List[Dict[str, str]] = []
+    source = str(text or "")
+    tag_matches = list(re.finditer(r"【([^】]+)】", source))
+    if not tag_matches:
+        return annotations
+
+    i = 0
+    while i < len(tag_matches):
+        current = tag_matches[i]
+        current_text = current.group(1).strip()
+        if is_note_tag(current_text):
+            i += 1
+            continue
+
+        note = ""
+        if i + 1 < len(tag_matches):
+            next_text = tag_matches[i + 1].group(1).strip()
+            if is_note_tag(next_text):
+                note = f"【{next_text}】"
+                i += 1
+
+        prefix = source[: current.start()]
+        target_text = target_before_tag(prefix)
+        if target_text:
+            annotations.append({
+                "field": field,
+                "target_text": target_text,
+                "tag_text": current_text,
+                "tag_code": tag_code(current_text),
+                "note": note,
+            })
+        i += 1
+
+    return annotations
+
+
+def build_backfill_payload(row_number: int, row_values: Dict[str, Any]) -> Dict[str, Any]:
+    answers: Dict[str, Dict[str, str]] = {}
+    annotations: List[Dict[str, str]] = []
+
+    for field, (text_col, score_col, reason_col) in ANSWER_COLUMNS.items():
+        raw_text = str(row_values.get(text_col, "") or "")
+        score = str(row_values.get(score_col, "") or "") if score_col else ""
+        reason = str(row_values.get(reason_col, "") or "") if reason_col else ""
+        answers[field] = {
+            "text": strip_inline_tags(raw_text),
+            "score": score.strip(),
+            "reason": reason.strip(),
+        }
+        annotations.extend(parse_inline_annotations(raw_text, field))
+
+    return {
+        "row_number": row_number,
+        "prompt": str(row_values.get("A", "") or ""),
+        "answers": answers,
+        "annotations": annotations,
+    }
 
 
 def find_next_row(lark_output: Dict[str, Any]) -> int:
@@ -125,18 +226,26 @@ class SheetAppender:
 
     def read_state(self) -> Dict[str, Any]:
         if not self.state_path.exists():
-            return {"manual_next_row": None}
+            return {"manual_next_row": None, "backfill_row": None}
         try:
             with self.state_path.open("r", encoding="utf-8") as file:
                 state = json.load(file)
         except (OSError, json.JSONDecodeError):
-            return {"manual_next_row": None}
+            return {"manual_next_row": None, "backfill_row": None}
         if not isinstance(state, dict):
-            return {"manual_next_row": None}
-        return {"manual_next_row": state.get("manual_next_row")}
+            return {"manual_next_row": None, "backfill_row": None}
+        return {
+            "manual_next_row": state.get("manual_next_row"),
+            "backfill_row": state.get("backfill_row"),
+        }
 
     def write_state(self, state: Dict[str, Any]) -> None:
-        normalized = {"manual_next_row": state.get("manual_next_row")}
+        current = self.read_state()
+        current.update(state)
+        normalized = {
+            "manual_next_row": current.get("manual_next_row"),
+            "backfill_row": current.get("backfill_row"),
+        }
         with self.state_path.open("w", encoding="utf-8") as file:
             json.dump(normalized, file, ensure_ascii=False, indent=2)
 
@@ -157,6 +266,24 @@ class SheetAppender:
         if int(row) < 2:
             raise ValueError("row must be >= 2")
         self.write_state({"manual_next_row": int(row)})
+
+    def get_backfill_row(self) -> Optional[int]:
+        value = self.read_state().get("backfill_row")
+        if value in (None, ""):
+            return None
+        try:
+            row = int(value)
+        except (TypeError, ValueError):
+            return None
+        return row if row >= 2 else None
+
+    def set_backfill_row(self, row: Optional[int]) -> None:
+        if row is None:
+            self.write_state({"backfill_row": None})
+            return
+        if int(row) < 2:
+            raise ValueError("row must be >= 2")
+        self.write_state({"backfill_row": int(row)})
 
     def recent_logs(self, limit: int = 20) -> List[Dict[str, Any]]:
         if not self.log_path.exists():
@@ -185,6 +312,7 @@ class SheetAppender:
             "dry_run": self.dry_run,
             "mode": "manual" if manual_next_row else "auto",
             "manual_next_row": manual_next_row,
+            "backfill_row": self.get_backfill_row(),
             "target": {
                 "spreadsheet_token": self.spreadsheet_token,
                 "sheet_id": self.sheet_id,
@@ -210,6 +338,36 @@ class SheetAppender:
             ]
         )
         return find_next_row(output)
+
+    def get_sheet_row_values(self, row_number: int) -> Dict[str, str]:
+        output = run_lark(
+            [
+                "sheets",
+                "+csv-get",
+                "--spreadsheet-token",
+                self.spreadsheet_token,
+                "--sheet-id",
+                self.sheet_id,
+                "--range",
+                f"A{row_number}:L{row_number}",
+                "--rows-json",
+                "--format",
+                "json",
+            ]
+        )
+        rows = output.get("data", {}).get("rows", []) or []
+        if not rows:
+            raise ValueError(f"row {row_number} not found")
+        return rows[0].get("values", {}) or {}
+
+    def backfill_payload(self, row_number: Optional[int] = None) -> Dict[str, Any]:
+        target_row = row_number or self.get_backfill_row()
+        if not target_row:
+            raise ValueError("backfill row is not set")
+        row_values = self.get_sheet_row_values(target_row)
+        payload = build_backfill_payload(target_row, row_values)
+        self.set_backfill_row(target_row + 1)
+        return payload
 
     def find_written(self, page_url: str) -> Optional[Dict[str, Any]]:
         if not page_url or not self.log_path.exists():
@@ -330,6 +488,11 @@ def dashboard_html(appender: SheetAppender) -> str:
     <button class="secondary" onclick="clearRow()">改回自动找空行</button>
     <p id="message" class="muted">比如填 20：下一次 F8 写第 20 行，成功后这里会自动变成 21。</p>
 
+    <label for="backfillRow">F10 回填表格行号</label>
+    <input id="backfillRow" type="number" min="2" placeholder="填行号后 F10 回填" value="{state['backfill_row'] or ''}">
+    <button onclick="saveBackfillRow()">设置回填行号</button>
+    <p id="backfillMessage" class="muted">比如填 3：页面按 F10 会读取第 3 行评分/理由/tag，成功取数后这里自动变成 4。</p>
+
     <h2>最近写入</h2>
     <button class="secondary" onclick="clearRecent()" style="margin-left:0;">清空最近写入</button>
     <table>
@@ -363,6 +526,7 @@ def dashboard_html(appender: SheetAppender) -> str:
     function renderState(data) {{
       document.getElementById('mode').textContent = data.manual_next_row ? '从指定行连续写入' : '自动找下一空行';
       document.getElementById('nextRow').value = data.manual_next_row || '';
+      document.getElementById('backfillRow').value = data.backfill_row || '';
       renderRecent(data.recent || []);
     }}
     async function refreshState() {{
@@ -398,6 +562,22 @@ def dashboard_html(appender: SheetAppender) -> str:
       const data = await res.json();
       document.getElementById('nextRow').value = '';
       document.getElementById('message').textContent = data.ok ? '已改回自动找下一空行' : data.error;
+      if (data.ok) renderState(data);
+    }}
+    async function saveBackfillRow() {{
+      const value = document.getElementById('backfillRow').value.trim();
+      const row = Number(value);
+      if (!Number.isInteger(row) || row < 2) {{
+        document.getElementById('backfillMessage').textContent = '回填行号必须是 >= 2 的整数';
+        return;
+      }}
+      const res = await fetch('/api/backfill-row', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ backfill_row: row }})
+      }});
+      const data = await res.json();
+      document.getElementById('backfillMessage').textContent = data.ok ? ('已设置：F10 将读取第 ' + data.backfill_row + ' 行') : data.error;
       if (data.ok) renderState(data);
     }}
     async function clearRecent() {{
@@ -449,6 +629,16 @@ class AppendHandler(BaseHTTPRequestHandler):
         if path == "/api/state":
             self._json(200, self.appender.control_state())
             return
+        if path == "/api/backfill-row":
+            try:
+                row = self.appender.get_backfill_row()
+                payload = self.appender.backfill_payload(row)
+                self._json(200, {"ok": True, **payload, **self.appender.control_state()})
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._json(500, {"ok": False, "error": str(exc)})
+            return
         if path.startswith("/health"):
             self._json(200, {"ok": True, "service": "siflow-sheet-service"})
             return
@@ -463,6 +653,20 @@ class AppendHandler(BaseHTTPRequestHandler):
                 payload = json.loads(body or "{}")
                 value = payload.get("manual_next_row")
                 self.appender.set_manual_next_row(None if value in (None, "") else int(value))
+                self._json(200, self.appender.control_state())
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/backfill-row":
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+                body = self.rfile.read(length).decode("utf-8")
+                payload = json.loads(body or "{}")
+                value = payload.get("backfill_row")
+                self.appender.set_backfill_row(None if value in (None, "") else int(value))
                 self._json(200, self.appender.control_state())
             except ValueError as exc:
                 self._json(400, {"ok": False, "error": str(exc)})

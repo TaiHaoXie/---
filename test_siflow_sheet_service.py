@@ -5,8 +5,10 @@ from pathlib import Path
 from siflow_sheet_service import (
     SheetAppender,
     build_sheet_row,
+    build_backfill_payload,
     csv_for_row,
     find_next_row,
+    parse_inline_annotations,
     strip_char_count,
     validate_payload,
 )
@@ -150,6 +152,58 @@ class SiflowSheetServiceTests(unittest.TestCase):
 
             appender.clear_logs()
             self.assertEqual(appender.recent_logs(), [])
+
+    def test_parse_inline_annotations_extracts_label_and_note(self):
+        text = (
+            "有严重问题，方案不可取。羽绒的主要成分是羽毛蛋白（角蛋白），"
+            "长期或高温干燥会导致蛋白质发生热降解、变性、交联甚至碳化，"
+            "【R-FACT-1：事实错误】【R-FACT-1-P0：家用烘干机高温档通常不超过80°C】"
+            "使纤维变脆。"
+        )
+
+        annotations = parse_inline_annotations(text, "A")
+
+        self.assertEqual(len(annotations), 1)
+        self.assertEqual(annotations[0]["field"], "A")
+        self.assertEqual(annotations[0]["tag_code"], "R-FACT-1")
+        self.assertEqual(annotations[0]["tag_text"], "R-FACT-1：事实错误")
+        self.assertEqual(annotations[0]["note"], "【R-FACT-1-P0：家用烘干机高温档通常不超过80°C】")
+        self.assertEqual(
+            annotations[0]["target_text"],
+            "羽绒的主要成分是羽毛蛋白（角蛋白），长期或高温干燥会导致蛋白质发生热降解、变性、交联甚至碳化",
+        )
+
+    def test_parse_inline_annotations_handles_good_tag_without_note(self):
+        text = "因此，恢复羽绒靠的是低温烘干和机械拍打。【C-R-03-逻辑严谨-因果链清楚】"
+
+        annotations = parse_inline_annotations(text, "C")
+
+        self.assertEqual(annotations[0]["tag_code"], "C-R-03")
+        self.assertEqual(annotations[0]["note"], "")
+        self.assertEqual(annotations[0]["target_text"], "因此，恢复羽绒靠的是低温烘干和机械拍打")
+
+    def test_build_backfill_payload_maps_columns_and_annotations(self):
+        row_values = {
+            "A": "prompt",
+            "B": "答案A【R-FACT-1：事实错误】【R-FACT-1-P0：备注】",
+            "C": "2",
+            "D": "A理由",
+            "E": "答案B",
+            "F": "3",
+            "G": "B理由",
+            "H": "答案C【C-R-03：逻辑严谨】",
+            "I": "4",
+            "J": "C理由",
+            "K": "无",
+        }
+
+        payload = build_backfill_payload(12, row_values)
+
+        self.assertEqual(payload["row_number"], 12)
+        self.assertEqual(payload["answers"]["A"]["score"], "2")
+        self.assertEqual(payload["answers"]["B"]["reason"], "B理由")
+        self.assertEqual(payload["answers"]["D"]["text"], "无")
+        self.assertEqual([a["tag_code"] for a in payload["annotations"]], ["R-FACT-1", "C-R-03"])
 
 
 class FakeAppender(SheetAppender):
