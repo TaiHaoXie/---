@@ -143,10 +143,17 @@
     return "评分选项不存在：" + field + " = " + score + "；页面可选：" + options;
   }
 
-  function pickDirectScoreInputIndex(controlCount, hasReason) {
+  function pickDirectScoreInputIndex(controlCount) {
     if (controlCount <= 0) return null;
-    if (hasReason && controlCount < 2) return null;
     return 0;
+  }
+
+  function pickDirectReasonInputIndex(controlCount, scoreInputIndex) {
+    if (controlCount <= 0) return null;
+    for (let index = controlCount - 1; index >= 0; index--) {
+      if (index !== scoreInputIndex) return index;
+    }
+    return null;
   }
 
   function getDirectInputControls(row) {
@@ -383,7 +390,7 @@
     }
 
     const directControls = getDirectInputControls(row);
-    let scoreControl = null;
+    let scoreInputIndex = null;
 
     if (answer.score) {
       const selector = row.querySelector(".ant-select-selector, [role='combobox']");
@@ -403,20 +410,25 @@
       }
 
       if (!handledBySelect) {
-        const scoreInputIndex = pickDirectScoreInputIndex(directControls.length, Boolean(answer.reason));
+        scoreInputIndex = pickDirectScoreInputIndex(directControls.length);
         if (scoreInputIndex == null) {
           if (selectOptions.length) throw new Error(formatScoreOptionError(field, answer.score, selectOptions));
           throw new Error("找不到评分输入框：" + field + "；可见输入框数量：" + directControls.length);
         }
-        scoreControl = directControls[scoreInputIndex];
-        setNativeValue(scoreControl, normalizeScoreText(answer.score));
+        setNativeValue(directControls[scoreInputIndex], normalizeScoreText(answer.score));
       }
     }
 
     if (answer.reason) {
-      const reasonControls = directControls.filter(control => control !== scoreControl);
-      const target = reasonControls[reasonControls.length - 1];
-      if (!target) throw new Error("找不到理由输入框：" + field);
+      const reasonInputIndex = pickDirectReasonInputIndex(directControls.length, scoreInputIndex);
+      const target = reasonInputIndex == null ? null : directControls[reasonInputIndex];
+      if (!target) {
+        console.warn("[Siflow F10] 跳过理由：找不到独立理由输入框", {
+          field,
+          visibleInputs: directControls.length,
+        });
+        return "ok_reason_skipped";
+      }
       setNativeValue(target, answer.reason);
     }
 

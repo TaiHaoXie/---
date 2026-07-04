@@ -80,10 +80,17 @@
     return "评分选项不存在：" + field + " = " + score + "；页面可选：" + options;
   }
 
-  function pickDirectScoreInputIndex(controlCount, hasReason) {
+  function pickDirectScoreInputIndex(controlCount) {
     if (controlCount <= 0) return null;
-    if (hasReason && controlCount < 2) return null;
     return 0;
+  }
+
+  function pickDirectReasonInputIndex(controlCount, scoreInputIndex) {
+    if (controlCount <= 0) return null;
+    for (let index = controlCount - 1; index >= 0; index--) {
+      if (index !== scoreInputIndex) return index;
+    }
+    return null;
   }
 
   const api = {
@@ -94,6 +101,7 @@
     findScoreOptionText,
     formatScoreOptionError,
     pickDirectScoreInputIndex,
+    pickDirectReasonInputIndex,
   };
 
   if (typeof module !== "undefined" && module.exports) {

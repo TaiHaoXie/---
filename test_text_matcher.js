@@ -45,8 +45,11 @@ assert.ok(
     .includes("页面可选：0 / 1 / 2 / 3 / 4")
 );
 
-assert.strictEqual(matcher.pickDirectScoreInputIndex(2, true), 0);
-assert.strictEqual(matcher.pickDirectScoreInputIndex(1, false), 0);
-assert.strictEqual(matcher.pickDirectScoreInputIndex(1, true), null);
+assert.strictEqual(matcher.pickDirectScoreInputIndex(2), 0);
+assert.strictEqual(matcher.pickDirectScoreInputIndex(1), 0);
+
+assert.strictEqual(matcher.pickDirectReasonInputIndex(2, 0), 1);
+assert.strictEqual(matcher.pickDirectReasonInputIndex(1, 0), null);
+assert.strictEqual(matcher.pickDirectReasonInputIndex(1, null), 0);
 
 console.log("text matcher tests OK");
