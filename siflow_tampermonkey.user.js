@@ -116,6 +116,93 @@
     return prefix.length >= 20 && candidate.includes(prefix) ? 60 : 0;
   }
 
+  function compactLogText(value, maxLength = 120) {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    if (text.length <= maxLength) return text;
+    return text.slice(0, maxLength) + "...";
+  }
+
+  function formatLogDetail(details) {
+    const parts = [];
+    if (details?.field) parts.push("字段：" + details.field);
+    if (details?.tag) parts.push("标签：" + details.tag);
+    if (details?.target) parts.push("原句：" + compactLogText(details.target));
+    if (details?.message) parts.push("原因：" + compactLogText(details.message));
+    return parts.join("；");
+  }
+
+  function createBackfillLog(rowNumber = "") {
+    const entries = [];
+    let currentRowNumber = rowNumber;
+    let failedStep = "";
+    let failedDetails = {};
+
+    function step(name, status = "ok", details = {}) {
+      const entry = {
+        time: new Date().toLocaleTimeString(),
+        name,
+        status,
+        details,
+      };
+      entries.push(entry);
+
+      if (status === "fail") {
+        failedStep = name;
+        failedDetails = details || {};
+        console.error("[Siflow F10]", name, details);
+      } else {
+        console.log("[Siflow F10]", status, name, details);
+      }
+
+      return entry;
+    }
+
+    function setRowNumber(value) {
+      currentRowNumber = value;
+    }
+
+    function failureMessage(error) {
+      const lines = [
+        "F10 回填失败",
+        currentRowNumber ? "表格行：第 " + currentRowNumber + " 行" : "",
+        failedStep ? "失败步骤：" + failedStep : "",
+        formatLogDetail(failedDetails),
+        error?.message ? "错误：" + error.message : "",
+        "",
+        "最近步骤：",
+      ].filter(Boolean);
+
+      for (const entry of entries.slice(-8)) {
+        const detail = formatLogDetail(entry.details);
+        lines.push("- " + entry.time + " [" + entry.status + "] " + entry.name + (detail ? "；" + detail : ""));
+      }
+
+      return lines.join("\n");
+    }
+
+    return {
+      entries,
+      setRowNumber,
+      step,
+      failureMessage,
+    };
+  }
+
+  async function runBackfillStep(log, name, details, task) {
+    log.step(name, "start", details);
+    try {
+      const result = await task();
+      log.step(name, "ok", details);
+      return result;
+    } catch (error) {
+      log.step(name, "fail", {
+        ...details,
+        message: error?.message || String(error),
+      });
+      throw error;
+    }
+  }
+
   function getBlock(card, field) {
     const item = [...card.querySelectorAll(".ant-form-item")]
       .find(candidate => getLabel(candidate) === field);
@@ -247,23 +334,24 @@
   }
 
   async function fillScoreAndReason(field, answer) {
-    if (!answer) return;
+    if (!answer || (!answer.score && !answer.reason)) return "skip";
+
     const row = findScoreRow(field);
     if (!row) {
-      console.warn("[Siflow backfill] score row not found", field);
-      return;
+      throw new Error("找不到评分/理由行：" + field);
     }
 
     if (answer.score) {
       const selector = row.querySelector(".ant-select-selector, [role='combobox']");
-      if (selector) {
-        selector.click();
-        await sleep(200);
-        const option = [...document.querySelectorAll(".ant-select-item-option, [role='option']")]
-          .filter(isVisible)
-          .find(el => getText(el) === String(answer.score));
-        if (option) option.click();
-      }
+      if (!selector) throw new Error("找不到评分下拉框：" + field);
+
+      selector.click();
+      await sleep(200);
+      const option = [...document.querySelectorAll(".ant-select-item-option, [role='option']")]
+        .filter(isVisible)
+        .find(el => getText(el) === String(answer.score));
+      if (!option) throw new Error("评分选项不存在：" + field + " = " + answer.score);
+      option.click();
     }
 
     if (answer.reason) {
@@ -271,8 +359,11 @@
         .filter(isVisible)
         .filter(el => el.closest(".ant-select") == null);
       const target = controls[controls.length - 1];
-      if (target) setNativeValue(target, answer.reason);
+      if (!target) throw new Error("找不到理由输入框：" + field);
+      setNativeValue(target, answer.reason);
     }
+
+    return "ok";
   }
 
   function findTextRange(root, targetText) {
@@ -495,6 +586,12 @@
     document.dispatchEvent(new Event("selectionchange", { bubbles: true }));
     root.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
     await sleep(250);
+
+    if (!selection.rangeCount || selection.isCollapsed || !clean(selection.toString())) {
+      throw new Error("浏览器选区为空，页面没有接受脚本划选");
+    }
+
+    return clean(selection.toString());
   }
 
   function findTagButton(tagCode) {
@@ -510,57 +607,116 @@
       });
   }
 
-  async function saveActiveNote(tagCode, note) {
-    await sleep(300);
+  function findActiveNotePopover(tagCode) {
     const popovers = [...document.querySelectorAll(".ant-popover")]
       .filter(isVisible)
       .filter(popover => getText(popover).includes("编辑备注"));
-    const popover = popovers.find(el => getText(el).includes(tagCode)) || popovers[0];
-    if (!popover) return;
+    return popovers.find(el => getText(el).includes(tagCode)) || popovers[0] || null;
+  }
+
+  async function waitForActiveNotePopover(tagCode, timeoutMs = 2500) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const popover = findActiveNotePopover(tagCode);
+      if (popover) return popover;
+      await sleep(150);
+    }
+    throw new Error("点击标签后没有出现备注弹窗：" + tagCode);
+  }
+
+  async function saveActiveNote(tagCode, note) {
+    const popover = await waitForActiveNotePopover(tagCode);
 
     const textarea = popover.querySelector("textarea");
+    if (!textarea) throw new Error("备注弹窗里没有输入框：" + tagCode);
     if (textarea && note) setNativeValue(textarea, note);
 
     const save = [...popover.querySelectorAll("button")]
       .find(button => getText(button).replace(/\s+/g, "") === "保存");
-    if (save) {
-      save.click();
-      await sleep(200);
-    }
+    if (!save) throw new Error("备注弹窗里没有保存按钮：" + tagCode);
+
+    save.click();
+    await sleep(250);
+    return true;
   }
 
-  async function applyAnnotation(annotation) {
-    await selectTextInField(annotation.field, annotation.target_text);
+  async function applyAnnotation(annotation, log, index, total) {
+    const details = {
+      field: annotation.field,
+      tag: annotation.tag_code,
+      target: annotation.target_text,
+      message: index + "/" + total,
+    };
 
-    const button = findTagButton(annotation.tag_code);
-    if (!button) throw new Error("找不到标签按钮：" + annotation.tag_code);
-    button.click();
-    await saveActiveNote(annotation.tag_code, annotation.note || "");
+    await runBackfillStep(log, "选中文本", details, () =>
+      selectTextInField(annotation.field, annotation.target_text)
+    );
+
+    const button = await runBackfillStep(log, "查找标签按钮", details, async () => {
+      const found = findTagButton(annotation.tag_code);
+      if (!found) throw new Error("找不到标签按钮：" + annotation.tag_code);
+      return found;
+    });
+
+    await runBackfillStep(log, "点击标签按钮", details, async () => {
+      button.click();
+      await sleep(200);
+    });
+
+    await runBackfillStep(log, "填写备注并保存", details, () =>
+      saveActiveNote(annotation.tag_code, annotation.note || "")
+    );
   }
 
   async function applyBackfill() {
+    const log = createBackfillLog();
+    window.__siflowBackfillLastLog = log;
+
     try {
       setButton("取数中...", "#64748b", BACKFILL_BUTTON_ID);
-      const result = await getJson(BACKFILL_URL);
-      if (!result.ok) throw new Error(result.error || "读取回填行失败");
+      const result = await runBackfillStep(log, "读取飞书行", {}, async () => {
+        const response = await getJson(BACKFILL_URL);
+        if (!response.ok) throw new Error(response.error || "读取回填行失败");
+        return response;
+      });
+      log.setRowNumber(result.row_number);
 
       setButton("填评分...", "#f59e0b", BACKFILL_BUTTON_ID);
       for (const field of ["A", "B", "C", "D"]) {
-        await fillScoreAndReason(field, result.answers?.[field]);
+        const answer = result.answers?.[field];
+        if (!answer || (!answer.score && !answer.reason)) {
+          log.step("跳过评分/理由", "skip", { field, message: "表格里没有评分或理由" });
+          continue;
+        }
+        await runBackfillStep(log, "填写评分/理由", { field }, () =>
+          fillScoreAndReason(field, answer)
+        );
       }
 
       setButton("打标签...", "#f59e0b", BACKFILL_BUTTON_ID);
-      for (const annotation of result.annotations || []) {
-        await applyAnnotation(annotation);
+      const annotations = result.annotations || [];
+      if (!annotations.length) {
+        log.step("跳过标签", "skip", { message: "本行没有解析到标签" });
+      }
+
+      for (let index = 0; index < annotations.length; index++) {
+        await applyAnnotation(annotations[index], log, index + 1, annotations.length);
       }
 
       setButton("已回填第 " + result.row_number + " 行", "#16a34a", BACKFILL_BUTTON_ID);
       console.log("[Siflow backfill]", result);
+      console.table(log.entries.map(entry => ({
+        time: entry.time,
+        status: entry.status,
+        step: entry.name,
+        detail: formatLogDetail(entry.details),
+      })));
       setTimeout(() => setButton(DEFAULT_BACKFILL_BUTTON_TEXT, "#1677ff", BACKFILL_BUTTON_ID), 1800);
     } catch (error) {
-      setButton("回填失败，看弹窗", "#dc2626", BACKFILL_BUTTON_ID);
-      alert(error.message || String(error));
-      console.error("[Siflow backfill failed]", error);
+      const message = log.failureMessage(error);
+      setButton("回填失败，看日志", "#dc2626", BACKFILL_BUTTON_ID);
+      alert(message);
+      console.error("[Siflow backfill failed]", message, error);
       setTimeout(() => setButton(DEFAULT_BACKFILL_BUTTON_TEXT, "#1677ff", BACKFILL_BUTTON_ID), 2500);
     }
   }
