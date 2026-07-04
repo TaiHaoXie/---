@@ -54,10 +54,39 @@
     return 0;
   }
 
+  function normalizeScoreText(value) {
+    const text = String(value || "")
+      .replace(/\r/g, "")
+      .split("")
+      .map(normalizeChar)
+      .join("")
+      .replace(/\s+/g, "")
+      .trim();
+    const exact = text.match(/^[0-9]$/);
+    if (exact) return exact[0];
+    const withSuffix = text.match(/^([0-9])分?$/);
+    if (withSuffix) return withSuffix[1];
+    return text;
+  }
+
+  function findScoreOptionText(optionTexts, score) {
+    const target = normalizeScoreText(score);
+    if (!target) return null;
+    return optionTexts.find(optionText => normalizeScoreText(optionText) === target) || null;
+  }
+
+  function formatScoreOptionError(field, score, optionTexts) {
+    const options = optionTexts.length ? optionTexts.join(" / ") : "未检测到可见选项";
+    return "评分选项不存在：" + field + " = " + score + "；页面可选：" + options;
+  }
+
   const api = {
     normalizeText,
     makeAnchors,
     scoreCandidate,
+    normalizeScoreText,
+    findScoreOptionText,
+    formatScoreOptionError,
   };
 
   if (typeof module !== "undefined" && module.exports) {

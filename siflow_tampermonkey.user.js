@@ -116,6 +116,33 @@
     return prefix.length >= 20 && candidate.includes(prefix) ? 60 : 0;
   }
 
+  function normalizeScoreText(value) {
+    const text = String(value || "")
+      .replace(/\r/g, "")
+      .split("")
+      .map(normalizeChar)
+      .join("")
+      .replace(/\s+/g, "")
+      .trim();
+    const exact = text.match(/^[0-9]$/);
+    if (exact) return exact[0];
+    const withSuffix = text.match(/^([0-9])分?$/);
+    if (withSuffix) return withSuffix[1];
+    return text;
+  }
+
+  function findScoreOption(optionElements, score) {
+    const target = normalizeScoreText(score);
+    if (!target) return null;
+    return optionElements.find(option => normalizeScoreText(getText(option)) === target) || null;
+  }
+
+  function formatScoreOptionError(field, score, optionElements) {
+    const optionTexts = optionElements.map(getText).filter(Boolean);
+    const options = optionTexts.length ? optionTexts.join(" / ") : "未检测到可见选项";
+    return "评分选项不存在：" + field + " = " + score + "；页面可选：" + options;
+  }
+
   function compactLogText(value, maxLength = 120) {
     const text = String(value || "").replace(/\s+/g, " ").trim();
     if (text.length <= maxLength) return text;
@@ -347,10 +374,10 @@
 
       selector.click();
       await sleep(200);
-      const option = [...document.querySelectorAll(".ant-select-item-option, [role='option']")]
-        .filter(isVisible)
-        .find(el => getText(el) === String(answer.score));
-      if (!option) throw new Error("评分选项不存在：" + field + " = " + answer.score);
+      const options = [...document.querySelectorAll(".ant-select-item-option, [role='option']")]
+        .filter(isVisible);
+      const option = findScoreOption(options, answer.score);
+      if (!option) throw new Error(formatScoreOptionError(field, answer.score, options));
       option.click();
     }
 

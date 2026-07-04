@@ -25,4 +25,24 @@ assert.strictEqual(
   0
 );
 
+assert.strictEqual(
+  matcher.findScoreOptionText(["0", "1", "2", "3", "4"], "3分"),
+  "3"
+);
+
+assert.strictEqual(
+  matcher.findScoreOptionText(["0", "1", "2", "3", "4"], "３"),
+  "3"
+);
+
+assert.strictEqual(
+  matcher.findScoreOptionText(["0", "1", "2", "3", "4"], "A"),
+  null
+);
+
+assert.ok(
+  matcher.formatScoreOptionError("A", "A", ["0", "1", "2", "3", "4"])
+    .includes("页面可选：0 / 1 / 2 / 3 / 4")
+);
+
 console.log("text matcher tests OK");
