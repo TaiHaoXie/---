@@ -67,6 +67,55 @@
       .trim();
   }
 
+  const PUNCT_MAP = new Map([
+    ["“", "\""], ["”", "\""], ["‘", "'"], ["’", "'"],
+    ["（", "("], ["）", ")"], ["【", "["], ["】", "]"],
+    ["：", ":"], ["；", ";"], ["，", ","], ["。", "."],
+    ["！", "!"], ["？", "?"],
+  ]);
+
+  function normalizeChar(ch) {
+    const code = ch.charCodeAt(0);
+    if (code === 12288) return " ";
+    if (code >= 65281 && code <= 65374) return String.fromCharCode(code - 65248);
+    return PUNCT_MAP.get(ch) || ch;
+  }
+
+  function normalizeForMatch(value) {
+    return String(value || "")
+      .replace(/\r/g, "")
+      .split("")
+      .map(normalizeChar)
+      .join("")
+      .replace(/[`*_~#>\-]+/g, "")
+      .replace(/\s+/g, "")
+      .replace(/[.,;:!?，。；：！？、]/g, "")
+      .toLowerCase()
+      .trim();
+  }
+
+  function makeAnchors(targetText, size = 14) {
+    const normalized = normalizeForMatch(targetText);
+    if (!normalized) return [];
+    if (normalized.length <= size * 2) return [normalized];
+    return [normalized.slice(0, size), normalized.slice(-size)];
+  }
+
+  function scoreCandidate(candidateText, targetText) {
+    const candidate = normalizeForMatch(candidateText);
+    const target = normalizeForMatch(targetText);
+    if (!candidate || !target) return 0;
+    if (candidate.includes(target) || target.includes(candidate)) return 100;
+
+    const anchors = makeAnchors(target);
+    const anchorHits = anchors.filter(anchor => anchor && candidate.includes(anchor)).length;
+    if (anchorHits === anchors.length && anchors.length > 0) return 80;
+    if (anchorHits > 0) return 45;
+
+    const prefix = target.length > 80 ? target.slice(0, 80) : target;
+    return prefix.length >= 20 && candidate.includes(prefix) ? 60 : 0;
+  }
+
   function getBlock(card, field) {
     const item = [...card.querySelectorAll(".ant-form-item")]
       .find(candidate => getLabel(candidate) === field);
@@ -230,27 +279,6 @@
     const target = clean(targetText);
     if (!target) return null;
 
-    function normalizeWithMap(value) {
-      let text = "";
-      const map = [];
-      let lastWasSpace = false;
-      for (let i = 0; i < value.length; i++) {
-        const ch = value[i];
-        if (/\s/.test(ch)) {
-          if (!lastWasSpace) {
-            text += " ";
-            map.push(i);
-            lastWasSpace = true;
-          }
-        } else {
-          text += ch;
-          map.push(i);
-          lastWasSpace = false;
-        }
-      }
-      return { text: text.trim(), map };
-    }
-
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     let node;
     while ((node = walker.nextNode())) {
@@ -270,26 +298,188 @@
         range.setEnd(node, index + length);
         return range;
       }
+    }
 
-      const normalizedValue = normalizeWithMap(value);
-      const normalizedTarget = target.replace(/\s+/g, " ").trim();
-      let normalizedIndex = normalizedValue.text.indexOf(normalizedTarget);
-      let normalizedLength = normalizedTarget.length;
-      if (normalizedIndex < 0 && normalizedTarget.length > 24) {
-        const shortTarget = normalizedTarget.slice(0, Math.min(80, normalizedTarget.length));
-        normalizedIndex = normalizedValue.text.indexOf(shortTarget);
-        normalizedLength = shortTarget.length;
-      }
-      if (normalizedIndex >= 0) {
-        const rawStart = normalizedValue.map[normalizedIndex];
-        const rawEnd = normalizedValue.map[Math.min(normalizedIndex + normalizedLength - 1, normalizedValue.map.length - 1)] + 1;
-        const range = document.createRange();
-        range.setStart(node, rawStart);
-        range.setEnd(node, rawEnd);
-        return range;
+    const flat = flattenText(root);
+    const normalizedTarget = normalizeForMatch(target);
+    let match = findNormalizedRange(flat, normalizedTarget);
+    if (match) return match;
+
+    if (normalizedTarget.length > 24) {
+      match = findNormalizedRange(flat, normalizedTarget.slice(0, Math.min(90, normalizedTarget.length)));
+      if (match) return match;
+    }
+
+    const anchors = makeAnchors(target);
+    if (anchors.length === 2) {
+      const start = flat.text.indexOf(anchors[0]);
+      const end = flat.text.indexOf(anchors[1], Math.max(0, start));
+      if (start >= 0 && end >= start) {
+        return rangeFromFlatMap(flat.map, start, end + anchors[1].length);
       }
     }
+
     return null;
+  }
+
+  function flattenText(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const map = [];
+    let text = "";
+    let node;
+
+    while ((node = walker.nextNode())) {
+      const raw = node.nodeValue || "";
+      for (let offset = 0; offset < raw.length; offset++) {
+        const normalized = normalizeForMatch(raw[offset]);
+        if (!normalized) continue;
+        for (const ch of normalized) {
+          text += ch;
+          map.push({ node, offset });
+        }
+      }
+    }
+    return { text, map };
+  }
+
+  function rangeFromFlatMap(map, start, end) {
+    if (!map[start] || !map[end - 1]) return null;
+    const range = document.createRange();
+    range.setStart(map[start].node, map[start].offset);
+    range.setEnd(map[end - 1].node, map[end - 1].offset + 1);
+    return range;
+  }
+
+  function findNormalizedRange(flat, normalizedTarget) {
+    if (!normalizedTarget) return null;
+    const index = flat.text.indexOf(normalizedTarget);
+    if (index < 0) return null;
+    return rangeFromFlatMap(flat.map, index, index + normalizedTarget.length);
+  }
+
+  function collectCandidateRanges(root, targetText) {
+    const candidates = [];
+    const textNodes = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      if ((node.nodeValue || "").trim()) textNodes.push(node);
+    }
+
+    for (const node of textNodes) {
+      const raw = node.nodeValue || "";
+      const regex = /[^。！？.!?\n]{8,}[。！？.!?]?/g;
+      let match;
+      while ((match = regex.exec(raw))) {
+        const snippet = clean(match[0]);
+        if (snippet.length < 8) continue;
+        const range = document.createRange();
+        range.setStart(node, match.index);
+        range.setEnd(node, match.index + match[0].length);
+        candidates.push({ text: snippet, range, score: scoreCandidate(snippet, targetText) });
+      }
+    }
+
+    const elementCandidates = [...root.querySelectorAll("p, li")]
+      .map(el => ({ el, text: clean(getText(el)) }))
+      .filter(item => item.text.length >= 8)
+      .map(item => {
+        const range = document.createRange();
+        range.selectNodeContents(item.el);
+        return { text: item.text, range, score: scoreCandidate(item.text, targetText) };
+      });
+
+    return [...candidates, ...elementCandidates]
+      .sort((a, b) => b.score - a.score || a.text.length - b.text.length)
+      .filter((item, index, arr) => arr.findIndex(x => x.text === item.text) === index)
+      .slice(0, 8);
+  }
+
+  function chooseCandidateRange(field, root, targetText) {
+    const candidates = collectCandidateRanges(root, targetText);
+    return new Promise((resolve, reject) => {
+      const overlay = document.createElement("div");
+      overlay.id = "__siflow_candidate_overlay__";
+      overlay.style.cssText = [
+        "position:fixed",
+        "inset:0",
+        "z-index:1000000",
+        "background:rgba(15,23,42,.35)",
+        "display:flex",
+        "align-items:center",
+        "justify-content:center",
+      ].join(";");
+
+      const panel = document.createElement("div");
+      panel.style.cssText = [
+        "width:760px",
+        "max-height:80vh",
+        "overflow:auto",
+        "background:#fff",
+        "border-radius:12px",
+        "box-shadow:0 12px 36px rgba(0,0,0,.24)",
+        "padding:18px",
+        "font-size:14px",
+        "color:#0f172a",
+      ].join(";");
+
+      panel.innerHTML = `
+        <h3 style="margin:0 0 8px;">没自动找到原句：${field}</h3>
+        <div style="margin-bottom:10px;color:#64748b;">目标原句：</div>
+        <div style="padding:8px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:12px;white-space:pre-wrap;">${escapeHtml(targetText)}</div>
+        <div style="margin-bottom:8px;color:#64748b;">请选择页面里的对应候选，选中后会继续打标签：</div>
+      `;
+
+      const list = document.createElement("div");
+      if (!candidates.length) {
+        list.innerHTML = `<div style="color:#dc2626;">没有候选。请手动检查这句是否还在页面里。</div>`;
+      }
+
+      candidates.forEach((candidate, index) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.style.cssText = [
+          "display:block",
+          "width:100%",
+          "text-align:left",
+          "margin:8px 0",
+          "padding:10px",
+          "border:1px solid #cbd5e1",
+          "border-radius:8px",
+          "background:#fff",
+          "cursor:pointer",
+          "color:#0f172a",
+        ].join(";");
+        button.innerHTML = `<strong>#${index + 1} 匹配分 ${candidate.score}</strong><br>${escapeHtml(candidate.text.slice(0, 220))}`;
+        button.onclick = () => {
+          overlay.remove();
+          resolve(candidate.range);
+        };
+        list.appendChild(button);
+      });
+
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = "取消这条";
+      cancel.style.cssText = "margin-top:12px;padding:8px 12px;border:0;border-radius:8px;background:#64748b;color:white;cursor:pointer;";
+      cancel.onclick = () => {
+        overlay.remove();
+        reject(new Error("已取消候选选择：" + targetText.slice(0, 40)));
+      };
+
+      panel.appendChild(list);
+      panel.appendChild(cancel);
+      overlay.appendChild(panel);
+      document.body.appendChild(overlay);
+    });
+  }
+
+  function escapeHtml(value) {
+    return String(value || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   }
 
   async function selectTextInField(field, targetText) {
@@ -297,10 +487,7 @@
     if (!item) throw new Error("找不到文本块：" + field);
 
     const root = item.querySelector(".markdown-content") || item;
-    const range = findTextRange(root, targetText);
-    if (!range) {
-      throw new Error("在 " + field + " 里找不到原句：" + targetText.slice(0, 60));
-    }
+    const range = findTextRange(root, targetText) || await chooseCandidateRange(field, root, targetText);
 
     const selection = window.getSelection();
     selection.removeAllRanges();
